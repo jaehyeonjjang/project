@@ -1,0 +1,276 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "DHT.h"
+#include <DS1302.h>
+#include <Adafruit_NeoPixel.h>
+#include <SoftwareSerial.h>  // 블루투스용
+
+// ================= LCD & 센서 =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define DHTPIN 13
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+int SoilA = A0;
+int IN1 = 10;
+int IN2 = 9;
+
+#define TRIG_PIN 4
+#define ECHO_PIN 5
+#define TANK_HEIGHT_CM 14.8
+
+int LOW_WATER_LED = 12;
+
+// ================= DS1302 & NeoPixel =================
+#define DS1302_RST_PIN 6
+#define DS1302_DAT_PIN 7
+#define DS1302_CLK_PIN 8
+
+#define NEOPIXEL_PIN     3
+#define NUMPIXELS        8
+
+#define SUNSET_HOUR      17
+#define SUNSET_MINUTE    1
+#define SUNRISE_HOUR     6
+#define SUNRISE_MINUTE   0
+
+DS1302 rtc(DS1302_RST_PIN, DS1302_DAT_PIN, DS1302_CLK_PIN);
+Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+// 시간 제어용 millis
+unsigned long previousSensorMillis = 0;
+unsigned long previousPixelMillis = 0;
+
+const unsigned long SENSOR_INTERVAL = 2000;
+const unsigned long PIXEL_INTERVAL = 20;
+
+float rainbowOffset = 0.0; // 무지개 애니메이션 오프셋
+
+// ================= 블루투스 =================
+SoftwareSerial BTSerial(11, 2); // D2: RX, D3: TX
+
+// HSV to RGB 변환 함수
+uint32_t hsvToRgb(float h, float s, float v) {
+  int i = int(h * 6);
+  float f = h * 6 - i;
+  float p = v * (1 - s);
+  float q = v * (1 - f * s);
+  float t = v * (1 - (1 - f) * s);
+  float r, g, b;
+
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+  }
+
+  return pixels.Color(int(r * 255), int(g * 255), int(b * 255));
+}
+
+void setup() {
+  Serial.begin(9600);
+  BTSerial.begin(9600); // 블루투스 시리얼 시작
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(LOW_WATER_LED, OUTPUT);
+
+  lcd.init();
+  lcd.backlight();
+  dht.begin();
+
+  rtc.halt(false);
+  rtc.writeProtect(false);
+  rtc.setTime(17, 19, 00); // 최초 1회만 설정, 이후 주석 처리
+
+  pixels.begin();
+  pixels.clear();
+  pixels.show();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // === 블루투스 명령 수신 처리 ===
+// 블루투스 명령 처리
+if (BTSerial.available()) {
+  String cmd = BTSerial.readStringUntil('\n');
+  cmd.trim(); // 공백 제거
+
+  // ▶ 물 펌프 ON (수동 제어)
+  if (cmd == "T") {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    delay(1500);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    lcd.setCursor(0, 0);
+    lcd.print("BTN: Motor ON ");
+    BTSerial.println("Motor ON");
+
+  // ▶ 물 펌프 OFF (강제 정지)
+  } else if (cmd == "F") {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    lcd.setCursor(0, 0);
+    lcd.print("BTN: Motor OFF");
+    BTSerial.println("Motor OFF");
+
+  // ▶ 시간 정보 요청
+  } else if (cmd == "TIME") {
+    BTSerial.print("Time: ");
+    BTSerial.println(rtc.getTimeStr());
+
+  // ▶ 토양 수분 요청
+  } else if (cmd == "SOIL") {
+    int soil = analogRead(SoilA);
+    BTSerial.print("Soil: ");
+    BTSerial.println(soil);
+
+  // ▶ 온도 요청
+  } else if (cmd == "TEMP") {
+    int temp = dht.readTemperature();
+    BTSerial.print("Temp: ");
+    BTSerial.println(temp);
+
+  // ▶ 습도 요청
+  } else if (cmd == "HUM") {
+    int hum = dht.readHumidity();
+    BTSerial.print("Hum: ");
+    BTSerial.println(hum);
+
+  // ▶ 수위 요청
+  } else if (cmd == "WATER") {
+    digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    float dist = duration * 0.0343 / 2.0;
+    float level = TANK_HEIGHT_CM - dist;
+    if (level < 0) level = 0;
+    BTSerial.print("Water Level: ");
+    BTSerial.println(level);
+}
+} else if (cmd == "LED_ON") {
+  digitalWrite(LOW_WATER_LED, HIGH);
+  lcd.setCursor(0, 0);
+  lcd.print("LED: ON         ");
+  BTSerial.println("LED ON");
+
+} else if (cmd == "LED_OFF") {
+  digitalWrite(LOW_WATER_LED, LOW);
+  lcd.setCursor(0, 0);
+  lcd.print("LED: OFF        ");
+  BTSerial.println("LED OFF");
+}
+    BTSerial.print("Time: "); BTSerial.print(rtc.getTimeStr());
+    BTSerial.print(" | Soil: "); BTSerial.print(soil);
+    BTSerial.print(" | Temp: "); BTSerial.print(temp);
+    BTSerial.print(" | Hum: "); BTSerial.print(hum);
+    BTSerial.print(" | Water Level: "); BTSerial.println(level);
+  }
+
+  // ▶ 향후 명령어 추가를 위한 공간 예시
+  /*
+  else if (cmd == "LED_ON") {
+    digitalWrite(LED_PIN, HIGH);
+    BTSerial.println("LED 켜짐");
+  }
+  */
+}
+
+
+
+  // === 2초마다 센서 처리 ===
+  if (currentMillis - previousSensorMillis >= SENSOR_INTERVAL) {
+    previousSensorMillis = currentMillis;
+
+    Time now = rtc.getTime();
+    int soilValue = analogRead(SoilA);
+    int h = dht.readHumidity();
+    int t = dht.readTemperature();
+
+    // 수위 측정
+    digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    float distanceCm = duration * 0.0343 / 2.0;
+    float waterLevelCm = TANK_HEIGHT_CM - distanceCm;
+    if (waterLevelCm < 0) waterLevelCm = 0;
+
+    // LCD 출력 & 자동 급수
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    if (soilValue > 650) {
+      lcd.print("Auto: Motor ON");
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      delay(1500);
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      lcd.setCursor(0, 0);
+      lcd.print("Auto: Motor OFF");
+    } else {
+      lcd.print("Moisture OK");
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+    }
+
+    lcd.setCursor(0, 1);
+    lcd.print(t); lcd.print("C ");
+    lcd.print(h); lcd.print("% ");
+    lcd.print(int(waterLevelCm)); lcd.print("cm");
+
+    digitalWrite(LOW_WATER_LED, waterLevelCm < 3.0 ? HIGH : LOW);
+
+    Serial.print("Time: "); Serial.print(rtc.getTimeStr());
+    Serial.print(" | Soil: "); Serial.print(soilValue);
+    Serial.print(" | Temp: "); Serial.print(t);
+    Serial.print(" | Hum: "); Serial.print(h);
+    Serial.print(" | Water Level: "); Serial.println(waterLevelCm);
+  }
+
+  // === 20ms마다 무지개 애니메이션 ===
+  if (currentMillis - previousPixelMillis >= PIXEL_INTERVAL) {
+    previousPixelMillis = currentMillis;
+
+    Time now = rtc.getTime();
+    bool afterSunset = (now.hour > SUNSET_HOUR || (now.hour == SUNSET_HOUR && now.min >= SUNSET_MINUTE));
+    bool beforeSunrise = (now.hour < SUNRISE_HOUR || (now.hour == SUNRISE_HOUR && now.min < SUNRISE_MINUTE));
+
+    if (afterSunset || beforeSunrise) {
+      pixels.setBrightness(128);
+      for (int i = 0; i < NUMPIXELS; i++) {
+        float hue = fmod(rainbowOffset + (float)i / NUMPIXELS, 1.0);
+        uint32_t color = hsvToRgb(hue, 1.0, 1.0);
+        pixels.setPixelColor(i, color);
+      }
+      pixels.show();
+
+      rainbowOffset += 0.005;
+      if (rainbowOffset > 1.0) rainbowOffset -= 1.0;
+    } else {
+      pixels.clear();
+      pixels.show();
+    }
+  }
+
+  // 시리얼 현재 시간 출력 (옵션)
+  // JSON 형식 데이터 출력 (앱/PC용)
+BTSerial.print("{");
+BTSerial.print("\"Time\":\""); BTSerial.print(rtc.getTimeStr()); BTSerial.print("\",");
+BTSerial.print("\"Soil\":"); BTSerial.print(soilValue); BTSerial.print(",");
+BTSerial.print("\"Temp\":"); BTSerial.print(t); BTSerial.print(",");
+BTSerial.print("\"Hum\":"); BTSerial.print(h); BTSerial.print(",");
+BTSerial.print("\"Water\":"); BTSerial.print(waterLevelCm);
+BTSerial.println("}");
+
+
+}
